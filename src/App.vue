@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { useWorkshopStore } from './stores/workshop'
 
@@ -14,6 +14,14 @@ const nav = [
   { to: '/script', label: '排练脚本', icon: '序' },
   { to: '/print', label: '打印中心', icon: '印' },
 ]
+
+onMounted(() => {
+  void store.hydrate()
+})
+
+async function syncNow() {
+  await store.syncReceipts()
+}
 </script>
 
 <template>
@@ -52,6 +60,11 @@ const nav = [
           {{ store.isOffline ? '离线草稿已保存' : '协作服务正常' }}
         </div>
         <p>版本 {{ store.revision }} · {{ store.lastSaved }}</p>
+        <p v-if="store.outboxCount" class="outbox-line">
+          {{ store.isSyncing ? '正在同步' : `${store.outboxCount} 项回执待同步` }}
+          <button v-if="!store.isOffline" class="inline-link" @click="syncNow">立即同步</button>
+        </p>
+        <p v-else-if="store.lastSyncAt" class="muted-line">回执已同步</p>
         <button class="ghost-button" @click="store.toggleOffline">
           {{ store.isOffline ? '恢复连接' : '模拟离线' }}
         </button>
@@ -175,6 +188,28 @@ const nav = [
   color: #d9e4e9;
   background: transparent;
   cursor: pointer;
+}
+
+.outbox-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #e6b25c !important;
+}
+
+.inline-link {
+  padding: 2px 6px;
+  border: 1px solid #426172;
+  border-radius: 4px;
+  color: #a9e5df;
+  background: transparent;
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.muted-line {
+  color: #7f92a0 !important;
 }
 
 .content {

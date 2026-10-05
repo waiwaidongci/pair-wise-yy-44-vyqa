@@ -1,17 +1,27 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useWorkshopStore, type Cue, type Department } from '../stores/workshop'
 
 const store = useWorkshopStore()
 const commentText = ref('')
 const showRouteEditor = ref(true)
+const distributeDept = ref<Department | null>(null)
 const departments: Array<'全部' | Department> = ['全部', '舞台', '灯光', '音响', '道具']
 const acts = ['全部', '第一幕', '第二幕', '第三幕']
 
 const cue = computed(() => store.selectedCue)
-const routePoints = computed(() => cue.value?.route.map((point) => `${point.x},${point.y}`).join(' ') ?? '')
 const conflictCues = computed(() => new Set(store.conflicts.map((item) => item.id)))
+const availableDepartments = computed(
+  () => departments.slice(1).filter((dept) => !cue.value?.distributeTo.includes(dept as Department)) as Department[],
+)
+const confirmedCount = computed(
+  () => cue.value?.distributeTo.filter((dept) => store.receiptStatus(cue.value!, dept) === '已确认').length ?? 0,
+)
+
+onMounted(() => {
+  void store.hydrate()
+})
 
 function selectCue(item: Cue) {
   store.selectedId = item.id
@@ -41,6 +51,43 @@ function submitComment() {
 
 function updateCue(key: keyof Cue, value: unknown) {
   store.updateCue({ [key]: value } as Partial<Cue>)
+}
+
+async function confirmReceipt(dept: Department) {
+  const result = await store.confirmReceipt(cue.value!.id, dept)
+  if (result?.queued) ElMessage.success('回执已加入离线队列，回网后自动同步')
+  else if (result?.conflict) ElMessage.warning('已有更新版本生效，以当前版本为准')
+  else if (result?.alreadyConfirmed) ElMessage.info('该回执已生效，无需重复确认')
+  else ElMessage.success(`${dept} 已确认收到当前版本`)
+}
+
+function distribute() {
+  if (!distributeDept.value) return
+  store.distributeCue(cue.value!.id, distributeDept.value)
+  ElMessage.success(`已发放到 ${distributeDept.value}，等待回执`)
+  distributeDept.value = null
+}
+
+async function syncAll() {
+  const result = await store.syncReceipts()
+  if (result.ok) {
+    if (result.synced === 0 && result.deduped === 0) ElMessage.info('没有待同步的回执')
+    else ElMessage.success(`回执同步完成：新增 ${result.synced}，去重 ${result.deduped}，过期 ${result.conflicts}`)
+  } else {
+    ElMessage.error('同步失败，已保留原队列，可重试')
+  }
+}
+
+function receiptLabel(c: Cue, dept: Department) {
+  if (store.isPendingSync(c.id, dept)) return '待同步'
+  return store.receiptStatus(c, dept)
+}
+
+function receiptTagType(c: Cue, dept: Department) {
+  const label = receiptLabel(c, dept)
+  if (label === '已确认') return 'success'
+  if (label === '未发放') return 'info'
+  return 'warning'
 }
 </script>
 
@@ -86,6 +133,9 @@ function updateCue(key: keyof Cue, value: unknown) {
       </div>
       <el-switch v-model="showRouteEditor" active-text="路线编辑" />
       <el-button @click="store.addCue" :disabled="store.locked">新增提示</el-button>
+      <el-button v-if="store.outboxCount" type="warning" plain @click="syncAll" :loading="store.isSyncing">
+        同步回执{{ store.outboxCount ? ` (${store.outboxCount})` : '' }}
+      </el-button>
       <el-tag :type="store.locked ? 'success' : 'info'" effect="plain">{{ store.locked ? '基线已锁定' : '草稿编辑中' }}</el-tag>
     </div>
 
@@ -145,7 +195,9 @@ function updateCue(key: keyof Cue, value: unknown) {
               <span>{{ cue.id }} · {{ cue.act }}</span>
               <h3>{{ cue.title }}</h3>
             </div>
-            <el-tag :type="cue.status === '已确认' ? 'success' : 'warning'" effect="plain">{{ cue.status }}</el-tag>
+            <el-tag :type="store.cueStatus(cue) === '已确认' ? 'success' : 'warning'" effect="plain">
+              {{ store.cueStatus(cue) }}
+            </el-tag>
           </div>
 
           <el-form label-position="top" size="small" :disabled="store.locked">
@@ -174,6 +226,40 @@ function updateCue(key: keyof Cue, value: unknown) {
               </div>
             </el-form-item>
           </el-form>
+
+          <div class="receipt-block">
+            <div class="receipt-head">
+              <strong>部门回执</strong>
+              <span class="muted">
+                {{ cue.version }} 版 · 已收齐 {{ confirmedCount }}/{{ cue.distributeTo.length }}
+                <template v-if="store.outboxCount"> · {{ store.outboxCount }} 项待同步</template>
+              </span>
+            </div>
+            <div class="receipt-list">
+              <div v-for="dept in cue.distributeTo" :key="dept" class="receipt-row">
+                <span class="receipt-dept">{{ dept }}</span>
+                <el-tag :type="receiptTagType(cue, dept)" effect="plain" size="small">
+                  {{ receiptLabel(cue, dept) }}
+                </el-tag>
+                <el-button
+                  size="small"
+                  :loading="store.isSyncing && store.isPendingSync(cue.id, dept)"
+                  :disabled="store.locked || store.receiptStatus(cue, dept) === '已确认'"
+                  @click="confirmReceipt(dept)"
+                >
+                  {{ store.isPendingSync(cue.id, dept) ? '同步中…' : '确认回执' }}
+                </el-button>
+              </div>
+              <el-empty v-if="cue.distributeTo.length === 0" description="尚未发放到部门" :image-size="40" />
+            </div>
+            <div class="receipt-distribute">
+              <el-select v-model="distributeDept" size="small" placeholder="发放到部门" style="width: 140px">
+                <el-option v-for="dept in availableDepartments" :key="dept" :label="dept" :value="dept" />
+              </el-select>
+              <el-button size="small" :disabled="!distributeDept || store.locked" @click="distribute">发放</el-button>
+            </div>
+            <p class="receipt-tip">提示内容变更后，旧回执自动作废并回到待确认；未收齐当前版本的部门不能进入基线或打印。</p>
+          </div>
 
           <div class="comment-block">
             <div class="comment-head">
@@ -449,6 +535,57 @@ function updateCue(key: keyof Cue, value: unknown) {
   color: #53606c;
   background: #f6f8f8;
   font-size: 11px;
+}
+
+.receipt-block {
+  padding-top: 12px;
+  border-top: 1px solid #e4e9eb;
+}
+
+.receipt-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+
+.receipt-list {
+  display: grid;
+  gap: 6px;
+}
+
+.receipt-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 9px;
+  border: 1px solid #e5eaec;
+  border-radius: 6px;
+  background: #f9fafa;
+}
+
+.receipt-dept {
+  min-width: 44px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.receipt-row .el-tag {
+  margin-right: auto;
+}
+
+.receipt-distribute {
+  display: flex;
+  gap: 7px;
+  margin-top: 9px;
+}
+
+.receipt-tip {
+  margin: 9px 0 0;
+  color: #8a959d;
+  font-size: 11px;
+  line-height: 1.6;
 }
 
 .comment-block {

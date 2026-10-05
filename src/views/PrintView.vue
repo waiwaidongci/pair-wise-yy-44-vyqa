@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue'
+import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useWorkshopStore } from '../stores/workshop'
 
@@ -8,11 +8,22 @@ const includeNotes = ref(true)
 const includeRoutes = ref(true)
 const includeComments = ref(false)
 
+const canPrint = computed(() => store.allReceiptsCurrent)
+const pendingCount = computed(() => store.pendingCues.length)
+
+function ensurePrintable(): boolean {
+  if (canPrint.value) return true
+  ElMessage.warning(`还有 ${pendingCount.value} 项提示未收齐当前版本回执，无法打印清单`)
+  return false
+}
+
 function print() {
+  if (!ensurePrintable()) return
   window.print()
 }
 
 function exportCsv() {
+  if (!ensurePrintable()) return
   const rows = [
     ['编号', '时间码', '场景', '提示', '部门', '责任', '路线节点', '状态'],
     ...store.cues.map((cue) => [
@@ -23,7 +34,7 @@ function exportCsv() {
       cue.department,
       cue.owner,
       cue.route.map((point) => `${point.x},${point.y}`).join(' > '),
-      cue.status,
+      store.cueStatus(cue),
     ]),
   ]
   const csv = `\uFEFF${rows.map((row) => row.map((cell) => `"${String(cell).replaceAll('"', '""')}"`).join(',')).join('\n')}`
@@ -50,6 +61,16 @@ function exportCsv() {
         <el-button type="primary" @click="print">打印 / 导出 PDF</el-button>
       </div>
     </div>
+
+    <el-alert
+      v-if="!canPrint"
+      class="gate-alert no-print"
+      type="warning"
+      show-icon
+      :closable="false"
+      :title="`回执未收齐（${pendingCount} 项）`"
+      description="当前版本还有部门未确认回执，打印清单与 CSV 导出已停用；请先在舞台工作区收齐当前版本回执。"
+    />
 
     <div class="print-options panel no-print">
       <strong>文档内容</strong>
@@ -95,7 +116,12 @@ function exportCsv() {
             </td>
             <td>{{ cue.department }}<br /><small>{{ cue.owner }}</small></td>
             <td>{{ cue.duration }} 秒</td>
-            <td>{{ cue.status }}</td>
+            <td>
+              {{ store.cueStatus(cue) }}
+              <small v-if="cue.distributeTo.length">
+                回执 {{ cue.distributeTo.filter((dept) => store.receiptStatus(cue, dept) === '已确认').length }}/{{ cue.distributeTo.length }}
+              </small>
+            </td>
           </tr>
         </tbody>
       </table>
@@ -120,6 +146,10 @@ function exportCsv() {
   gap: 18px;
   margin-bottom: 14px;
   padding: 12px 15px;
+}
+
+.gate-alert {
+  margin-bottom: 12px;
 }
 
 .print-revision {

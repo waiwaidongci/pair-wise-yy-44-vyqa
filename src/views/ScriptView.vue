@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { useWorkshopStore } from '../stores/workshop'
+import { useWorkshopStore, type Cue } from '../stores/workshop'
 
 const store = useWorkshopStore()
 const query = ref('')
@@ -14,14 +14,12 @@ const script = computed(() =>
     .sort((a, b) => a.time.localeCompare(b.time)),
 )
 
-function confirmCue(id: string) {
-  store.selectedId = id
-  store.updateCue({ status: '已确认' })
-  ElMessage.success(`${id} 已并入当前排练脚本`)
-}
-
 function lock() {
-  store.lockBaseline()
+  const result = store.lockBaseline()
+  if (!result.ok) {
+    ElMessage.warning(`还有 ${result.pending.length} 项提示未收齐当前版本回执，无法锁定基线`)
+    return
+  }
   ElMessage.success('演出基线已锁定，后续修改将从新分支开始')
 }
 </script>
@@ -46,7 +44,7 @@ function lock() {
       <el-segmented v-model="selectedAct" :options="acts" />
       <div class="baseline-status">
         <span class="status-dot" :style="{ background: store.locked ? '#41936b' : '#d68c27' }" />
-        {{ store.locked ? `基线 ${store.revision} 已锁定` : `${store.revision} · ${store.cues.filter((cue) => cue.status !== '已确认').length} 项待确认` }}
+        {{ store.locked ? `基线 ${store.revision} 已锁定` : `${store.revision} · ${store.pendingCues.length} 项未收齐回执` }}
       </div>
     </div>
 
@@ -67,8 +65,8 @@ function lock() {
                 <span>{{ cue.id }} · {{ cue.act }} / {{ cue.scene }}</span>
                 <h3>{{ cue.title }}</h3>
               </div>
-              <el-tag :type="cue.status === '已确认' ? 'success' : cue.status === '待确认' ? 'warning' : 'info'" effect="plain">
-                {{ cue.status }}
+              <el-tag :type="store.cueStatus(cue) === '已确认' ? 'success' : 'warning'" effect="plain">
+                {{ store.cueStatus(cue) }}
               </el-tag>
             </div>
             <p>{{ cue.note || '暂无补充说明' }}</p>
@@ -78,10 +76,23 @@ function lock() {
               <span>路线：{{ cue.route.length }} 节点</span>
               <span v-if="cue.comments.length">留言：{{ cue.comments.length }}</span>
             </div>
+            <div class="receipt-chips">
+              <template v-if="cue.distributeTo.length">
+                <span
+                  v-for="dept in cue.distributeTo"
+                  :key="dept"
+                  class="receipt-chip"
+                  :class="store.receiptStatus(cue, dept)"
+                >
+                  {{ dept }} · {{ store.receiptStatus(cue, dept) }}
+                </span>
+              </template>
+              <span v-else class="receipt-chip none">未发放</span>
+            </div>
             <div class="script-actions">
-              <el-button size="small" @click="store.selectedId = cue.id; $router.push('/stage')">编辑走位</el-button>
-              <el-button v-if="cue.status !== '已确认'" size="small" type="primary" plain @click="confirmCue(cue.id)">确认节点</el-button>
-              <span v-else class="confirmed">已纳入 {{ store.revision }}</span>
+              <el-button size="small" @click="store.selectedId = cue.id; $router.push('/stage')">编辑走位 / 处理回执</el-button>
+              <span v-if="store.cueStatus(cue) === '已确认'" class="confirmed">已纳入 {{ store.revision }}</span>
+              <span v-else class="pending-receipt">还差 {{ store.pendingReceipts(cue).join('、') }} 回执</span>
             </div>
           </div>
         </article>
@@ -242,6 +253,49 @@ function lock() {
 .confirmed {
   color: #34805e;
   font-size: 11px;
+}
+
+.pending-receipt {
+  color: #b06a2b;
+  font-size: 11px;
+}
+
+.receipt-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.receipt-chip {
+  padding: 3px 8px;
+  border: 1px solid #e2e8ea;
+  border-radius: 4px;
+  color: #6b7883;
+  background: #f6f8f8;
+  font-size: 11px;
+}
+
+.receipt-chip.已确认 {
+  border-color: #bfe0d0;
+  color: #2f7d5c;
+  background: #eef7f2;
+}
+
+.receipt-chip.待确认 {
+  border-color: #ecd3a8;
+  color: #a06a1c;
+  background: #fdf6e7;
+}
+
+.receipt-chip.未发放 {
+  border-color: #d5dde1;
+  color: #8a959d;
+  background: #f1f4f5;
+}
+
+.receipt-chip.none {
+  color: #8a959d;
 }
 
 .version-panel {

@@ -17,7 +17,7 @@ const { data: project } = useQuery({
   },
 })
 
-const pending = computed(() => store.cues.filter((cue) => cue.status !== '已确认').length)
+const pending = computed(() => store.pendingCues.length)
 const comments = computed(() => store.cues.reduce((total, cue) => total + cue.comments.filter((item) => !item.resolved).length, 0))
 const totalMinutes = computed(() => Math.round(store.cues.reduce((sum, cue) => sum + cue.duration, 0) / 60))
 const byDepartment = computed(() =>
@@ -79,8 +79,8 @@ const nextCues = computed(() => [...store.cues].sort((a, b) => a.time.localeComp
               <strong>{{ cue.title }}</strong>
               <small>{{ cue.act }} / {{ cue.scene }} · {{ cue.owner }}</small>
             </span>
-            <el-tag :type="cue.status === '已确认' ? 'success' : cue.status === '待确认' ? 'warning' : 'info'" effect="plain">
-              {{ cue.status }}
+            <el-tag :type="store.cueStatus(cue) === '已确认' ? 'success' : 'warning'" effect="plain">
+              {{ store.cueStatus(cue) }}
             </el-tag>
           </button>
         </div>
