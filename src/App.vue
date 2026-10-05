@@ -11,6 +11,7 @@ const title = computed(() => String(route.meta.title ?? '巡演舞台'))
 const nav = [
   { to: '/', label: '巡演总览', icon: '总' },
   { to: '/stage', label: '舞台走位', icon: '图' },
+  { to: '/dispatch', label: '提示发放', icon: '发' },
   { to: '/script', label: '排练脚本', icon: '序' },
   { to: '/print', label: '打印中心', icon: '印' },
 ]
@@ -52,6 +53,7 @@ const nav = [
           {{ store.isOffline ? '离线草稿已保存' : '协作服务正常' }}
         </div>
         <p>版本 {{ store.revision }} · {{ store.lastSaved }}</p>
+        <p v-if="store.outbound.length" class="queue-hint">断网回执队列 {{ store.outbound.length }} 条</p>
         <button class="ghost-button" @click="store.toggleOffline">
           {{ store.isOffline ? '恢复连接' : '模拟离线' }}
         </button>
@@ -165,6 +167,10 @@ const nav = [
   margin: 8px 0 11px;
   color: #9eb0bc;
   font-size: 11px;
+}
+
+.queue-hint {
+  color: #e7b45a !important;
 }
 
 .ghost-button {

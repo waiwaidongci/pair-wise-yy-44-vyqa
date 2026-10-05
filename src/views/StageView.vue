@@ -1,7 +1,16 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import { useWorkshopStore, type Cue, type Department } from '../stores/workshop'
+import {
+  useWorkshopStore,
+  cueIssueState,
+  issueTagType,
+  isCueDirty,
+  missingDepartments,
+  effectiveReceipts,
+  type Cue,
+  type Department,
+} from '../stores/workshop'
 
 const store = useWorkshopStore()
 const commentText = ref('')
@@ -10,10 +19,14 @@ const departments: Array<'全部' | Department> = ['全部', '舞台', '灯光',
 const acts = ['全部', '第一幕', '第二幕', '第三幕']
 
 const cue = computed(() => store.selectedCue)
-const routePoints = computed(() => cue.value?.route.map((point) => `${point.x},${point.y}`).join(' ') ?? '')
 const conflictCues = computed(() => new Set(store.conflicts.map((item) => item.id)))
+const issueState = computed(() => (cue.value ? cueIssueState(cue.value) : '未发放'))
+const dirty = computed(() => (cue.value ? isCueDirty(cue.value) : false))
+const missing = computed(() => (cue.value ? missingDepartments(cue.value) : []))
+const effective = computed(() => (cue.value ? effectiveReceipts(cue.value) : []))
 
 function selectCue(item: Cue) {
+  store.endEdit()
   store.selectedId = item.id
 }
 
@@ -23,13 +36,30 @@ function addWaypoint(event: MouseEvent) {
   const rect = target.getBoundingClientRect()
   const x = Math.round(((event.clientX - rect.left) / rect.width) * 100)
   const y = Math.round(((event.clientY - rect.top) / rect.height) * 100)
+  store.beginEdit()
   store.addWaypoint({ x, y })
-  ElMessage.success('已追加路线节点')
+  ElMessage.success('已追加路线节点（属于未发布改动，发布后才作废旧回执）')
 }
 
-function saveCue() {
-  localStorage.setItem('stage-scheduler-last-action', new Date().toISOString())
-  ElMessage.success(store.isOffline ? '已保存到离线草稿' : `已同步 ${store.revision}`)
+/** 已发放提示：内容先进入未发布草稿；未发放提示：改动仅为编辑稿 */
+function editField(key: keyof Cue, value: unknown) {
+  store.beginEdit()
+  store.editDraft({ [key]: value } as Partial<Cue>)
+}
+
+function publish() {
+  if (!cue.value) return
+  if (!cue.value.issuedAt) {
+    store.endEdit()
+    if (store.issueCue()) ElMessage.success(`${cue.value.id} 已按 v${cue.value.version} 发放，等待部门回执`)
+    return
+  }
+  if (!dirty.value) {
+    ElMessage.info('内容与已发放版本一致，无需发布')
+    return
+  }
+  store.endEdit()
+  if (store.publishDraft()) ElMessage.warning(`已发布新版，旧部门回执全部作废，${missing.value.join('、') || '各部门'} 需重新确认`)
 }
 
 function submitComment() {
@@ -37,10 +67,6 @@ function submitComment() {
   store.addComment(commentText.value.trim(), '制作人 · 陈曦')
   commentText.value = ''
   ElMessage.success('留言已加入待办')
-}
-
-function updateCue(key: keyof Cue, value: unknown) {
-  store.updateCue({ [key]: value } as Partial<Cue>)
 }
 </script>
 
@@ -55,7 +81,9 @@ function updateCue(key: keyof Cue, value: unknown) {
       <div class="actions">
         <el-button :disabled="!store.canUndo || store.locked" @click="store.undo()">撤销</el-button>
         <el-button :disabled="!store.canRedo || store.locked" @click="store.redo()">重做</el-button>
-        <el-button type="primary" @click="saveCue">{{ store.isOffline ? '保存草稿' : '同步版本' }}</el-button>
+        <el-button type="primary" :disabled="store.locked || (cue?.issuedAt && !dirty)" @click="publish">
+          {{ cue?.issuedAt ? (dirty ? '发布新版（旧回执作废）' : '已是发放版本') : '发放提示' }}
+        </el-button>
       </div>
     </div>
 
@@ -142,31 +170,64 @@ function updateCue(key: keyof Cue, value: unknown) {
         <div v-if="cue" class="editor">
           <div class="editor-title">
             <div>
-              <span>{{ cue.id }} · {{ cue.act }}</span>
+              <span>{{ cue.id }} · {{ cue.act }} · 内容版本 v{{ cue.version }}</span>
               <h3>{{ cue.title }}</h3>
             </div>
-            <el-tag :type="cue.status === '已确认' ? 'success' : 'warning'" effect="plain">{{ cue.status }}</el-tag>
+            <el-tag :type="issueTagType(issueState)" effect="dark">{{ issueState }}</el-tag>
+          </div>
+
+          <el-alert
+            v-if="cue.issuedAt && dirty"
+            class="dirty-alert"
+            type="warning"
+            show-icon
+            :closable="false"
+            title="有未发布的内容改动"
+            description="时间、路线或执行部门改动尚未发布；发布后旧版本回执立即作废，提示回到待确认。"
+          />
+          <el-alert
+            v-else-if="!cue.issuedAt"
+            class="dirty-alert"
+            type="info"
+            show-icon
+            :closable="false"
+            title="未发放"
+            description="编辑内容后点「发放提示」，部门才会收到当前版本的确认任务。"
+          />
+
+          <div class="receipt-strip">
+            <div v-for="department in cue.receivers" :key="department" class="receipt-chip">
+              <span>{{ department }}</span>
+              <el-tag
+                size="small"
+                :type="effective.some((item) => item.department === department) ? 'success' : 'danger'"
+                effect="plain"
+              >
+                {{ effective.some((item) => item.department === department) ? `已确认 v${cue.version}` : `待确认 v${cue.version}` }}
+              </el-tag>
+            </div>
+            <el-button size="small" text type="primary" @click="$router.push('/dispatch')">去发放台确认 →</el-button>
           </div>
 
           <el-form label-position="top" size="small" :disabled="store.locked">
             <div class="form-grid">
               <el-form-item label="场景">
-                <el-input :model-value="cue.scene" @update:model-value="updateCue('scene', $event)" />
+                <el-input :model-value="cue.scene" @focus="store.beginEdit()" @update:model-value="editField('scene', $event)" />
               </el-form-item>
               <el-form-item label="时间码">
-                <el-input :model-value="cue.time" @update:model-value="updateCue('time', $event)" />
+                <el-input :model-value="cue.time" @focus="store.beginEdit()" @update:model-value="editField('time', $event)" />
               </el-form-item>
               <el-form-item label="执行部门">
-                <el-select :model-value="cue.department" @update:model-value="updateCue('department', $event)">
+                <el-select :model-value="cue.department" @focus="store.beginEdit()" @update:model-value="editField('department', $event)">
                   <el-option v-for="department in departments.slice(1)" :key="department" :label="department" :value="department" />
                 </el-select>
               </el-form-item>
               <el-form-item label="责任角色">
-                <el-input :model-value="cue.owner" @update:model-value="updateCue('owner', $event)" />
+                <el-input :model-value="cue.owner" @focus="store.beginEdit()" @update:model-value="editField('owner', $event)" />
               </el-form-item>
             </div>
             <el-form-item label="执行说明">
-              <el-input type="textarea" :rows="3" :model-value="cue.note" @update:model-value="updateCue('note', $event)" />
+              <el-input type="textarea" :rows="3" :model-value="cue.note" @focus="store.beginEdit()" @update:model-value="editField('note', $event)" />
             </el-form-item>
             <el-form-item label="路线节点 / 触发时机">
               <div class="route-summary">
@@ -217,6 +278,7 @@ function updateCue(key: keyof Cue, value: unknown) {
           <span>{{ item.id }} · {{ item.department }}</span>
           <strong>{{ item.title }}</strong>
           <small>{{ item.time }} · {{ item.duration }} 秒</small>
+          <el-tag size="small" :type="issueTagType(cueIssueState(item))" effect="plain">{{ cueIssueState(item) }}</el-tag>
         </button>
       </div>
     </section>
@@ -423,6 +485,30 @@ function updateCue(key: keyof Cue, value: unknown) {
 .editor-title span {
   color: #6b7883;
   font-size: 11px;
+}
+
+.dirty-alert {
+  margin-bottom: 10px;
+}
+
+.receipt-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 9px 10px;
+  border: 1px dashed #c9d4d9;
+  border-radius: 7px;
+  background: #f6f9f9;
+}
+
+.receipt-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #4f5d68;
 }
 
 .editor-title h3 {

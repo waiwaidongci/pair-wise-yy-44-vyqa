@@ -2,7 +2,7 @@
 import { computed } from 'vue'
 import { useQuery } from '@tanstack/vue-query'
 import axios from 'axios'
-import { useWorkshopStore } from '../stores/workshop'
+import { useWorkshopStore, cueIssueState, issueTagType } from '../stores/workshop'
 
 const store = useWorkshopStore()
 const { data: project } = useQuery({
@@ -17,9 +17,8 @@ const { data: project } = useQuery({
   },
 })
 
-const pending = computed(() => store.cues.filter((cue) => cue.status !== '已确认').length)
-const comments = computed(() => store.cues.reduce((total, cue) => total + cue.comments.filter((item) => !item.resolved).length, 0))
-const totalMinutes = computed(() => Math.round(store.cues.reduce((sum, cue) => sum + cue.duration, 0) / 60))
+const waiting = computed(() => store.waitingCues.length)
+const unissued = computed(() => store.unissuedCues.length)
 const byDepartment = computed(() =>
   ['舞台', '灯光', '音响', '道具'].map((department) => ({
     department,
@@ -38,8 +37,8 @@ const nextCues = computed(() => [...store.cues].sort((a, b) => a.time.localeComp
         <p class="muted">{{ project.venue }} · 排练日 {{ project.rehearsalDate }} · {{ project.company }}</p>
       </div>
       <div class="actions">
-        <el-button @click="store.toggleOffline">{{ store.isOffline ? '恢复在线' : '模拟离线' }}</el-button>
-        <el-button type="primary" @click="$router.push('/stage')">进入舞台工作区</el-button>
+        <el-button @click="store.toggleOffline">{{ store.isOffline ? '恢复在线（自动合并回执）' : '模拟离线' }}</el-button>
+        <el-button type="primary" @click="$router.push('/dispatch')">进入提示发放台</el-button>
       </div>
     </div>
 
@@ -50,19 +49,21 @@ const nextCues = computed(() => [...store.cues].sort((a, b) => a.time.localeComp
         <small>覆盖三幕 {{ new Set(store.cues.map((cue) => cue.scene)).size }} 个场景</small>
       </article>
       <article class="metric">
-        <span>待确认事项</span>
-        <strong class="amber">{{ pending }}</strong>
-        <small>确认后进入演出基线</small>
+        <span>待收回执</span>
+        <strong class="amber">{{ waiting }}</strong>
+        <small>已发放但部门未收齐，缺 {{ store.missingSlotCount }} 个回执</small>
       </article>
       <article class="metric">
-        <span>未解决留言</span>
-        <strong class="red">{{ comments }}</strong>
-        <small>跨部门协同处理中</small>
+        <span>未发放提示</span>
+        <strong class="slate">{{ unissued }}</strong>
+        <small>含无回执的旧数据，按未发放显示</small>
       </article>
       <article class="metric">
-        <span>计划时长</span>
-        <strong>{{ totalMinutes }}<small> 分</small></strong>
-        <small>当前版本 {{ store.revision }}</small>
+        <span>演出基线</span>
+        <strong :class="store.locked ? 'green' : store.baselineReady ? 'green' : 'red'">
+          {{ store.locked ? store.revision : store.baselineReady ? '可锁定' : '拦截中' }}
+        </strong>
+        <small>{{ store.locked ? `锁定于 ${store.baselineAt}` : `${store.fullyConfirmedCues.length}/${store.cues.length} 条收齐` }}</small>
       </article>
     </div>
 
@@ -79,8 +80,8 @@ const nextCues = computed(() => [...store.cues].sort((a, b) => a.time.localeComp
               <strong>{{ cue.title }}</strong>
               <small>{{ cue.act }} / {{ cue.scene }} · {{ cue.owner }}</small>
             </span>
-            <el-tag :type="cue.status === '已确认' ? 'success' : cue.status === '待确认' ? 'warning' : 'info'" effect="plain">
-              {{ cue.status }}
+            <el-tag :type="issueTagType(cueIssueState(cue))" effect="plain">
+              {{ cueIssueState(cue) }}
             </el-tag>
           </button>
         </div>
@@ -111,6 +112,14 @@ const nextCues = computed(() => [...store.cues].sort((a, b) => a.time.localeComp
 <style scoped>
 .amber {
   color: #b77014 !important;
+}
+
+.slate {
+  color: #5d6b78 !important;
+}
+
+.green {
+  color: #2f7d5b !important;
 }
 
 .red {

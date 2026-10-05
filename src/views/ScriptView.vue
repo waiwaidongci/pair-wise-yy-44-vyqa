@@ -1,7 +1,13 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
-import { ElMessage } from 'element-plus'
-import { useWorkshopStore } from '../stores/workshop'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import {
+  useWorkshopStore,
+  cueIssueState,
+  issueTagType,
+  missingDepartments,
+  effectiveReceipts,
+} from '../stores/workshop'
 
 const store = useWorkshopStore()
 const query = ref('')
@@ -14,15 +20,22 @@ const script = computed(() =>
     .sort((a, b) => a.time.localeCompare(b.time)),
 )
 
-function confirmCue(id: string) {
-  store.selectedId = id
-  store.updateCue({ status: '已确认' })
-  ElMessage.success(`${id} 已并入当前排练脚本`)
-}
-
 function lock() {
-  store.lockBaseline()
-  ElMessage.success('演出基线已锁定，后续修改将从新分支开始')
+  const result = store.lockBaseline()
+  if (result.ok) {
+    ElMessage.success(`演出基线 ${store.revision} 已锁定，打印中心仅输出收齐回执的当前版本`)
+    return
+  }
+  const lines = result.blockers
+    .map((item) => {
+      const detail = item.state === '待确认' ? `缺 ${item.missing.join('、')} 的回执` : '尚未发放'
+      return `· ${item.cue.id} ${item.cue.title}：${detail}`
+    })
+    .join('<br/>')
+  ElMessageBox.alert(`${lines}<br/><br/>未收齐当前版本回执的提示不能进入基线。`, '基线锁定被阻止', {
+    dangerouslyUseHTMLString: true,
+    type: 'warning',
+  })
 }
 </script>
 
@@ -35,18 +48,36 @@ function lock() {
         <p class="muted">提示与走位按时间码串联；未确认节点不会进入锁定基线。</p>
       </div>
       <div class="actions">
-        <el-button :disabled="store.locked" @click="lock">锁定演出基线</el-button>
+        <el-button :disabled="store.locked || !store.baselineReady" @click="lock">锁定演出基线</el-button>
         <el-button v-if="store.locked" type="warning" plain @click="store.unlockBaseline">解锁修订</el-button>
-        <el-button type="primary" @click="$router.push('/print')">生成执行清单</el-button>
+        <el-button type="primary" :disabled="!store.baselineReady" @click="$router.push('/print')">生成执行清单</el-button>
       </div>
     </div>
+
+    <el-alert
+      v-if="!store.baselineReady && !store.locked"
+      class="baseline-alert"
+      type="warning"
+      show-icon
+      :closable="false"
+      title="基线尚未收齐"
+      :description="`${store.unissuedCues.length} 条未发放、${store.waitingCues.length} 条待确认、共缺 ${store.missingSlotCount} 个部门回执；这些提示不能进入基线或打印。`"
+    >
+      <el-button size="small" type="primary" plain style="margin-top: 8px" @click="$router.push('/dispatch')">去发放台催收</el-button>
+    </el-alert>
 
     <div class="panel script-toolbar">
       <el-input v-model="query" clearable placeholder="搜索提示、角色或说明" style="max-width: 320px" />
       <el-segmented v-model="selectedAct" :options="acts" />
       <div class="baseline-status">
-        <span class="status-dot" :style="{ background: store.locked ? '#41936b' : '#d68c27' }" />
-        {{ store.locked ? `基线 ${store.revision} 已锁定` : `${store.revision} · ${store.cues.filter((cue) => cue.status !== '已确认').length} 项待确认` }}
+        <span class="status-dot" :style="{ background: store.locked ? '#41936b' : store.baselineReady ? '#41936b' : '#d68c27' }" />
+        {{
+          store.locked
+            ? `基线 ${store.revision} 已锁定`
+            : store.baselineReady
+              ? `${store.revision} · 全部回执收齐，可锁定基线`
+              : `${store.revision} · 缺 ${store.missingSlotCount} 个部门回执`
+        }}
       </div>
     </div>
 
@@ -64,11 +95,11 @@ function lock() {
           <div class="script-card panel">
             <div class="script-card-head">
               <div>
-                <span>{{ cue.id }} · {{ cue.act }} / {{ cue.scene }}</span>
+                <span>{{ cue.id }} · {{ cue.act }} / {{ cue.scene }} · 内容版本 v{{ cue.version }}</span>
                 <h3>{{ cue.title }}</h3>
               </div>
-              <el-tag :type="cue.status === '已确认' ? 'success' : cue.status === '待确认' ? 'warning' : 'info'" effect="plain">
-                {{ cue.status }}
+              <el-tag :type="issueTagType(cueIssueState(cue))" effect="dark">
+                {{ cueIssueState(cue) }}
               </el-tag>
             </div>
             <p>{{ cue.note || '暂无补充说明' }}</p>
@@ -78,10 +109,25 @@ function lock() {
               <span>路线：{{ cue.route.length }} 节点</span>
               <span v-if="cue.comments.length">留言：{{ cue.comments.length }}</span>
             </div>
+            <div class="receipt-row">
+              <template v-if="cue.issuedAt">
+                <span v-for="department in cue.receivers" :key="department" class="receipt-pill">
+                  <i :class="effectiveReceipts(cue).some((item) => item.department === department) ? 'ok' : 'miss'" />
+                  {{ department }}
+                  {{ effectiveReceipts(cue).some((item) => item.department === department) ? '已确认' : '待确认' }}
+                </span>
+                <span v-if="missingDepartments(cue).length" class="missing-text">
+                  缺：{{ missingDepartments(cue).join('、') }}（v{{ cue.version }}）
+                </span>
+              </template>
+              <span v-else class="missing-text">未发放：{{ cue.receivers.join('、') }} 均无回执任务</span>
+            </div>
             <div class="script-actions">
               <el-button size="small" @click="store.selectedId = cue.id; $router.push('/stage')">编辑走位</el-button>
-              <el-button v-if="cue.status !== '已确认'" size="small" type="primary" plain @click="confirmCue(cue.id)">确认节点</el-button>
-              <span v-else class="confirmed">已纳入 {{ store.revision }}</span>
+              <el-button size="small" type="primary" plain @click="store.selectedId = cue.id; $router.push('/dispatch')">
+                {{ cueIssueState(cue) === '已确认' ? '查看回执' : '发放 / 催收回执' }}
+              </el-button>
+              <span v-if="cueIssueState(cue) === '已确认'" class="confirmed">已纳入当前版本，可进入基线</span>
             </div>
           </div>
         </article>
@@ -125,6 +171,49 @@ function lock() {
   gap: 14px;
   margin-bottom: 18px;
   padding: 12px 14px;
+}
+
+.baseline-alert {
+  margin-bottom: 12px;
+}
+
+.receipt-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.receipt-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  border: 1px solid #dfe5e8;
+  border-radius: 999px;
+  color: #53616c;
+  font-size: 11px;
+  background: #f7f9fa;
+}
+
+.receipt-pill i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.receipt-pill i.ok {
+  background: #3f9970;
+}
+
+.receipt-pill i.miss {
+  background: #d68c27;
+}
+
+.missing-text {
+  color: #a96a1f;
+  font-size: 11px;
 }
 
 .baseline-status {
